@@ -22,8 +22,22 @@
 EXPECT = {
     # torch.export rejects these models (dynamic indexing / control flow /
     # dynamic-arange shapes); recorded so a future torch that starts exporting
-    # them is noticed instead of silently re-covering them
-    "test_Tensor_index": "export-skip",
-    "test_quantization_shufflenet_v2_x1_0": "export-skip",
-    "test_torch_arange": "export-skip",
+    # them is noticed instead of silently re-covering them. Each entry pins the
+    # diagnostic torch.export raises, so a change in the rejection reason is a
+    # visible regression rather than a quiet skip.
+    "test_Tensor_index": {
+        "outcome": "skip",
+        # unbacked (data-dependent) index shape leaked past the exported graph
+        "needle": "Pending unbacked symbols",
+    },
+    "test_quantization_shufflenet_v2_x1_0": {
+        "outcome": "skip",
+        # torch.export cannot serialize the quantized packed-params object
+        "needle": "__obj_flatten__",
+    },
+    "test_torch_arange": {
+        "outcome": "skip",
+        # torch.export refuses to guard on the data-dependent arange bound
+        "needle": "Could not guard on data-dependent expression",
+    },
 }

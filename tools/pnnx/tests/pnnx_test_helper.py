@@ -25,6 +25,21 @@ try:
 except Exception:
     _PT2_EXPECT = {}
 
+
+def _pt2_expectation(exp):
+    # normalize one expectation-table value to (outcome, needle):
+    #   absent / "pass"      -> ("pass", None)
+    #   "export-skip"        -> ("skip", None)
+    #   {"outcome": "skip", "needle": "..."} -> ("skip", needle)
+    # needle: when an export-skip is reached, torch.export must reject the model
+    # with an error text containing this pinned diagnostic substring, so a
+    # model that starts failing for a different reason is a visible regression.
+    if isinstance(exp, dict):
+        return exp.get("outcome", "skip"), exp.get("needle")
+    if exp == "export-skip":
+        return "skip", None
+    return "pass", None
+
 # optional discovery knobs:
 #   PNNX_PT2_RESULT_LOG=<file>  append "tag<TAB>result" per test_pnnx call
 #   PNNX_PT2_RECORD_ONLY=1      disable expectation enforcement (only record)
@@ -42,29 +57,33 @@ def _record_pt2_result(tag, result):
         pass
 
 
-def _check_pt2_expectation(tag, result):
+def _check_pt2_expectation(tag, result, err=""):
     # audit one pt2 outcome against the pinned expectation (default "pass")
     if _PT2_RECORD_ONLY:
         return result
+    outcome, needle = _pt2_expectation(_PT2_EXPECT.get(tag))
     if result is None:
         # torch.export rejected the model: allowed only when recorded
-        exp = _PT2_EXPECT.get(tag, "pass")
-        if exp != "export-skip":
+        if outcome != "skip":
             print("[pt2-expect] %s: expected %s but torch.export skipped (None) -- "
-                  "record it in pt2_expectations.py if deliberate" % (tag, exp))
+                  "record it in pt2_expectations.py if deliberate" % (tag, outcome))
+            return False
+        if needle and needle not in (err or ""):
+            print("[pt2-expect] %s: export-skip reached but the exporter error no longer "
+                  "matches the pinned diagnostic %r\n  got: %s" % (tag, needle, (err or "")[:500]))
             return False
         return None
     # conversion ran: a previously-recorded export-skip that now passes is a
     # stale table entry (improvement) - keep passing but make it visible
-    if _PT2_EXPECT.get(tag) == "export-skip" and result is True:
+    if outcome == "skip" and result is True:
         print("[pt2-expect] %s: recorded as export-skip but now passes -- "
               "move it to pass in pt2_expectations.py" % tag)
     return result
 
 
-def _finalize_pt2(tag, result):
+def _finalize_pt2(tag, result, err=""):
     _record_pt2_result(tag, result)
-    return _check_pt2_expectation(tag, result)
+    return _check_pt2_expectation(tag, result, err)
 
 
 def _convert_pnnx(pt_path, inputshapes, pnnx_path=os.path.join("..", "src", "pnnx"), fp16=0):
@@ -332,10 +351,11 @@ def test_pnnx(net, args, inputshapes, tag, shape_only=False):
         # if the graph has dynamo symbols (unbacked), evaluate with concrete
         # inputs and inline them into the pt2
         _inline_exported_symbols(pt2_path, ep, _flatten_args(args))
-    except Exception:
+    except Exception as e:
         # torch.export does not support the model (dynamic shapes/control flow);
-        # only a deliberate export-skip expectation keeps this green
-        return _finalize_pt2(tag, None)
+        # only a deliberate export-skip expectation keeps this green; the error
+        # text is forwarded so a pinned diagnostic can be white-box validated
+        return _finalize_pt2(tag, None, str(e))
 
     if not _convert_pnnx(pt2_path, _inputshapes_with_dtype(args, inputshapes)):
         return _finalize_pt2(tag, False)
