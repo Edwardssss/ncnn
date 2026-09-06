@@ -262,7 +262,9 @@ static bool model_file_maybe_tnnproto(const std::string& path)
 
 static bool model_file_maybe_exportedprogram(const std::string& path)
 {
-    // a torch dynamo exported program (.pt2) is also a zip; check for models/model.json or archive_format
+    // a torch dynamo exported program (.pt2) is also a zip; check for the 2.8+
+    // archive markers (models/model.json / archive_format) or the legacy (<2.8)
+    // flat layout (serialized_exported_program.json)
     pnnx::StoreZipReader zip;
     if (zip.open(path) != 0)
         return false;
@@ -272,7 +274,7 @@ static bool model_file_maybe_exportedprogram(const std::string& path)
 
     for (size_t i = 0; i < names.size(); i++)
     {
-        if (names[i].find("models/model.json") != std::string::npos || names[i].find("archive_format") != std::string::npos)
+        if (names[i].find("models/model.json") != std::string::npos || names[i].find("archive_format") != std::string::npos || names[i] == "serialized_exported_program.json")
             return true;
     }
 

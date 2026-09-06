@@ -785,6 +785,7 @@ set(pnnx_SRCS
     utils.cpp
     pnnx_json.cpp
     load_exportedprogram.cpp
+    load_exportedprogram_legacy.cpp
 
     pass_level2.cpp
     pass_level3.cpp

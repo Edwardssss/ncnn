@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include "load_exportedprogram.h"
+#include "load_exportedprogram_legacy.h"
 
 #include "pnnx_json.h"
 #include "storezip.h"
@@ -244,33 +245,14 @@ static int read_dtype(const JsonValue& meta)
     return serde_dtype_to_pnnx_type(meta["dtype"].as_int());
 }
 
-// read one weight/constant record (raw storage bytes) from the zip into an
-// Attribute, materializing the logical row-major tensor described by the
-// serialized tensor_meta (sizes / strides / storage_offset) so transposed,
-// sliced, or shared-storage views are stored correctly.
-static void load_tensor_data(StoreZipReader& zip, const std::vector<std::string>& names,
-                             const std::string& dir, const std::string& path_name,
-                             const JsonValue& meta, Attribute& a)
+// materialize the logical row-major tensor described by the serialized
+// tensor_meta (sizes / strides / storage_offset) out of a raw storage buffer
+// into an Attribute, so transposed, sliced, or shared-storage views are stored
+// correctly. shared by the 2.8+ archive path (raw byte records) and the
+// legacy(<2.8) path (raw storage shards from a pickled state dict). raw is
+// taken by value because the contiguous path may resize it.
+static void load_tensor_from_raw(std::vector<char> raw, const JsonValue& meta, Attribute& a)
 {
-    std::string record;
-    for (size_t j = 0; j < names.size(); j++)
-    {
-        if (names[j].find(dir + "/" + path_name) != std::string::npos || names[j] == path_name)
-        {
-            record = names[j];
-            break;
-        }
-    }
-
-    if (record.empty())
-    {
-        fprintf(stderr, "tensor record %s/%s not found\n", dir.c_str(), path_name.c_str());
-        return;
-    }
-
-    uint64_t size = zip.get_file_size(record);
-    std::vector<char> raw((size_t)size);
-    zip.read_file(record, raw.data());
 
     // parse serialized sizes / strides / storage_offset from tensor_meta
     std::vector<int> sizes;
@@ -539,6 +521,35 @@ static void load_tensor_data(StoreZipReader& zip, const std::vector<std::string>
         memcpy(dst + n * (size_t)elemsize, src + sto * (size_t)elemsize, (size_t)elemsize);
     }
     a.data = out;
+}
+
+// read one weight/constant record (raw storage bytes) from the zip into an
+// Attribute (materialization is shared via load_tensor_from_raw).
+static void load_tensor_data(StoreZipReader& zip, const std::vector<std::string>& names,
+                             const std::string& dir, const std::string& path_name,
+                             const JsonValue& meta, Attribute& a)
+{
+    std::string record;
+    for (size_t j = 0; j < names.size(); j++)
+    {
+        if (names[j].find(dir + "/" + path_name) != std::string::npos || names[j] == path_name)
+        {
+            record = names[j];
+            break;
+        }
+    }
+
+    if (record.empty())
+    {
+        fprintf(stderr, "tensor record %s/%s not found\n", dir.c_str(), path_name.c_str());
+        return;
+    }
+
+    uint64_t size = zip.get_file_size(record);
+    std::vector<char> raw((size_t)size);
+    zip.read_file(record, raw.data());
+
+    load_tensor_from_raw(raw, meta, a);
 }
 
 // create a prim::Constant operator and wire it as an input of the consumer
@@ -1811,23 +1822,33 @@ int load_exportedprogram(const std::string& pt2path, Graph& g,
     }
 
     // locate records
+    // container layouts handled here:
+    //   2.8+  : {base}/models/model.json graph + {base}/data/weights/*config*.json
+    //           + raw byte shards (+ archive_format/archive_version records)
+    //   <2.8  : flat serialized_exported_program.json graph + pickled
+    //           serialized_state_dict.pt / serialized_constants.pt + version
     std::vector<std::string> names = zip.get_names();
     std::string model_json_name;
     std::string weights_config_name;
     std::string constants_config_name;
+    bool is_legacy = false;
     for (size_t i = 0; i < names.size(); i++)
     {
         if (model_json_name.empty() && names[i].find("models/model.json") != std::string::npos)
             model_json_name = names[i];
+        if (names[i] == "serialized_exported_program.json")
+            is_legacy = true;
         if (weights_config_name.empty() && names[i].find("weights") != std::string::npos && names[i].find("config") != std::string::npos && names[i].size() >= 5 && names[i].compare(names[i].size() - 5, 5, ".json") == 0)
             weights_config_name = names[i];
         if (constants_config_name.empty() && names[i].find("constants") != std::string::npos && names[i].find("config") != std::string::npos && names[i].size() >= 5 && names[i].compare(names[i].size() - 5, 5, ".json") == 0)
             constants_config_name = names[i];
     }
+    if (is_legacy && model_json_name.empty())
+        model_json_name = "serialized_exported_program.json";
 
     if (model_json_name.empty())
     {
-        fprintf(stderr, "models/model.json not found in %s\n", pt2path.c_str());
+        fprintf(stderr, "model graph record not found in %s\n", pt2path.c_str());
         return -1;
     }
 
@@ -1870,6 +1891,8 @@ int load_exportedprogram(const std::string& pt2path, Graph& g,
 
     // constants payload config : fqn -> { path_name, tensor_meta }
     std::map<std::string, std::pair<std::string, JsonValue> > constants;
+    // legacy payload raw bytes (filled by pnnx_load_legacy_payloads below)
+    std::map<std::string, std::vector<char> > legacy_raw;
     if (!constants_config_name.empty())
     {
         JsonValue cfg;
@@ -1888,6 +1911,15 @@ int load_exportedprogram(const std::string& pt2path, Graph& g,
                 constants[it->first] = std::make_pair(path_name, meta);
             }
         }
+    }
+
+    if (is_legacy)
+    {
+        // <2.8 container: there are no *config.json records, so weights and
+        // constants above are empty; decode the two pickled state dicts into
+        // the same maps and fill legacy_raw (see load_exportedprogram_legacy)
+        if (pnnx_load_legacy_payloads(zip, names, root, weights, constants, legacy_raw) != 0)
+            return -1;
     }
 
     const JsonValue& graph = root["graph_module"]["graph"];
@@ -1944,6 +1976,28 @@ int load_exportedprogram(const std::string& pt2path, Graph& g,
 
     // pass 1 : build graph inputs
     const JsonValue& input_specs = signature["input_specs"];
+
+    // materialize one attribute: the archive path reads raw bytes from the
+    // outer zip; the legacy path reads the pre-decoded bytes from legacy_raw
+    // (both then share load_tensor_from_raw for the meta view handling)
+    auto load_weight_attr = [&](Attribute& a, const std::string& fqn, const JsonValue& meta, const char* dir, const std::string& path_name) -> int {
+        if (is_legacy)
+        {
+            std::map<std::string, std::vector<char> >::const_iterator lit = legacy_raw.find(fqn);
+            if (lit == legacy_raw.end())
+            {
+                fprintf(stderr, "legacy weight bytes for '%s' not found\n", fqn.c_str());
+                return -1;
+            }
+            load_tensor_from_raw(lit->second, meta, a);
+        }
+        else
+        {
+            load_tensor_data(zip, names, dir, path_name, meta, a);
+        }
+        return 0;
+    };
+
     int user_input_index = 0;
     for (size_t i = 0; i < input_specs.size(); i++)
     {
@@ -1970,7 +2024,8 @@ int load_exportedprogram(const std::string& pt2path, Graph& g,
                 Attribute a;
                 a.type = read_dtype(meta);
                 read_sizes(meta, a.shape);
-                load_tensor_data(zip, names, "weights", path_name, meta, a);
+                if (load_weight_attr(a, fqn, meta, "weights", path_name) != 0)
+                    return -1;
 
                 op->attrs["data"] = a;
 
@@ -1986,7 +2041,8 @@ int load_exportedprogram(const std::string& pt2path, Graph& g,
                 Attribute a;
                 a.type = read_dtype(meta);
                 read_sizes(meta, a.shape);
-                load_tensor_data(zip, names, "constants", path_name, meta, a);
+                if (load_weight_attr(a, fqn, meta, "constants", path_name) != 0)
+                    return -1;
 
                 op->attrs["data"] = a;
 
@@ -2016,7 +2072,8 @@ int load_exportedprogram(const std::string& pt2path, Graph& g,
                 Attribute a;
                 a.type = read_dtype(meta);
                 read_sizes(meta, a.shape);
-                load_tensor_data(zip, names, "constants", path_name, meta, a);
+                if (load_weight_attr(a, fqn, meta, "constants", path_name) != 0)
+                    return -1;
 
                 op->attrs["data"] = a;
 
