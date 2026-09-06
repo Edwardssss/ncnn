@@ -253,7 +253,6 @@ static int read_dtype(const JsonValue& meta)
 // taken by value because the contiguous path may resize it.
 static void load_tensor_from_raw(std::vector<char> raw, const JsonValue& meta, Attribute& a)
 {
-
     // parse serialized sizes / strides / storage_offset from tensor_meta
     std::vector<int> sizes;
     std::vector<int64_t> strides;

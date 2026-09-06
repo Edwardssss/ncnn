@@ -195,27 +195,27 @@ struct Value
     bool b;
     int64_t i;
     std::string s;
-    std::vector<Value> list;  // tuple contents
+    std::vector<Value> list; // tuple contents
     std::map<std::string, Value> dict;
-    std::string shard;        // storage shard id
+    std::string shard; // storage shard id
     bool is_parameter;
 };
 
 // torch storage class name -> serde ScalarType
 static int storage_scalar_type(const std::string& cls)
 {
-    if (cls == "torch ByteStorage") return 1;         // uint8
-    if (cls == "torch CharStorage") return 2;         // int8
-    if (cls == "torch ShortStorage") return 3;        // int16
-    if (cls == "torch IntStorage") return 4;          // int32
-    if (cls == "torch LongStorage") return 5;         // int64
-    if (cls == "torch HalfStorage") return 6;         // float16
-    if (cls == "torch FloatStorage") return 7;        // float32
-    if (cls == "torch DoubleStorage") return 8;       // float64
-    if (cls == "torch ComplexFloatStorage") return 10; // complex64
+    if (cls == "torch ByteStorage") return 1;           // uint8
+    if (cls == "torch CharStorage") return 2;           // int8
+    if (cls == "torch ShortStorage") return 3;          // int16
+    if (cls == "torch IntStorage") return 4;            // int32
+    if (cls == "torch LongStorage") return 5;           // int64
+    if (cls == "torch HalfStorage") return 6;           // float16
+    if (cls == "torch FloatStorage") return 7;          // float32
+    if (cls == "torch DoubleStorage") return 8;         // float64
+    if (cls == "torch ComplexFloatStorage") return 10;  // complex64
     if (cls == "torch ComplexDoubleStorage") return 11; // complex128
-    if (cls == "torch BoolStorage") return 12;        // bool
-    if (cls == "torch BFloat16Storage") return 13;    // bfloat16
+    if (cls == "torch BoolStorage") return 12;          // bool
+    if (cls == "torch BFloat16Storage") return 13;      // bfloat16
     return 0;
 }
 
@@ -870,8 +870,7 @@ int pnnx_load_legacy_payloads(StoreZipReader& zip, const std::vector<std::string
         // persistent buffer data lives with the weights; non-persistent buffer
         // and tensor_constant data with the constants (mirrors the archive path)
         bool persistent = is_buffer && (!spec["buffer"].has("persistent") || spec["buffer"]["persistent"].as_bool());
-        std::map<std::string, std::pair<std::string, JsonValue> >& target =
-            (is_parameter || persistent) ? weights : constants;
+        std::map<std::string, std::pair<std::string, JsonValue> >& target = (is_parameter || persistent) ? weights : constants;
 
         target[fqn] = std::make_pair(rec->s, meta);
     }
