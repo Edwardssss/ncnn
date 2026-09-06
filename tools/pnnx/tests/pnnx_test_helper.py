@@ -16,6 +16,56 @@ import sys
 
 import torch
 
+# pt2 outcome expectation table: every test's pt2 channel is audited against it
+# so a silently dropped test (None) is a visible regression instead of a quiet
+# skip. unlisted tags default to "pass"; only torch.export-incompatible models
+# are recorded as "export-skip".
+try:
+    from pt2_expectations import EXPECT as _PT2_EXPECT
+except Exception:
+    _PT2_EXPECT = {}
+
+# optional discovery knobs:
+#   PNNX_PT2_RESULT_LOG=<file>  append "tag<TAB>result" per test_pnnx call
+#   PNNX_PT2_RECORD_ONLY=1      disable expectation enforcement (only record)
+_PT2_RESULT_LOG = os.environ.get("PNNX_PT2_RESULT_LOG", "")
+_PT2_RECORD_ONLY = os.environ.get("PNNX_PT2_RECORD_ONLY", "") == "1"
+
+
+def _record_pt2_result(tag, result):
+    if not _PT2_RESULT_LOG:
+        return
+    try:
+        with open(_PT2_RESULT_LOG, "a") as f:
+            f.write("%s\t%s\n" % (tag, result))
+    except Exception:
+        pass
+
+
+def _check_pt2_expectation(tag, result):
+    # audit one pt2 outcome against the pinned expectation (default "pass")
+    if _PT2_RECORD_ONLY:
+        return result
+    if result is None:
+        # torch.export rejected the model: allowed only when recorded
+        exp = _PT2_EXPECT.get(tag, "pass")
+        if exp != "export-skip":
+            print("[pt2-expect] %s: expected %s but torch.export skipped (None) -- "
+                  "record it in pt2_expectations.py if deliberate" % (tag, exp))
+            return False
+        return None
+    # conversion ran: a previously-recorded export-skip that now passes is a
+    # stale table entry (improvement) - keep passing but make it visible
+    if _PT2_EXPECT.get(tag) == "export-skip" and result is True:
+        print("[pt2-expect] %s: recorded as export-skip but now passes -- "
+              "move it to pass in pt2_expectations.py" % tag)
+    return result
+
+
+def _finalize_pt2(tag, result):
+    _record_pt2_result(tag, result)
+    return _check_pt2_expectation(tag, result)
+
 
 def _convert_pnnx(pt_path, inputshapes, pnnx_path=os.path.join("..", "src", "pnnx"), fp16=0):
     cmd = "%s %s inputshape=%s fp16=%d" % (pnnx_path, pt_path, ",".join(inputshapes), fp16)
@@ -283,11 +333,12 @@ def test_pnnx(net, args, inputshapes, tag, shape_only=False):
         # inputs and inline them into the pt2
         _inline_exported_symbols(pt2_path, ep, _flatten_args(args))
     except Exception:
-        # torch.export does not support the model (dynamic shapes/control flow), skip the pt2 test
-        return None
+        # torch.export does not support the model (dynamic shapes/control flow);
+        # only a deliberate export-skip expectation keeps this green
+        return _finalize_pt2(tag, None)
 
     if not _convert_pnnx(pt2_path, _inputshapes_with_dtype(args, inputshapes)):
-        return False
+        return _finalize_pt2(tag, False)
 
     try:
         mod_pnnx = _load_pnnx_module(tag)
@@ -296,11 +347,11 @@ def test_pnnx(net, args, inputshapes, tag, shape_only=False):
         # the generated pnnx python cannot be imported or run: that is a real
         # conversion/generation regression, report it as a failure instead of
         # silently skipping (None is reserved for torch.export incompatibility)
-        return False
+        return _finalize_pt2(tag, False)
 
     if shape_only:
-        return _outputs_shape_equal(ref, out)
-    return _outputs_equal(ref, out)
+        return _finalize_pt2(tag, _outputs_shape_equal(ref, out))
+    return _finalize_pt2(tag, _outputs_equal(ref, out))
 
 
 def _load_ncnn_module(tag):
