@@ -355,8 +355,7 @@ static void load_tensor_data(StoreZipReader& zip, const std::vector<std::string>
     {
         // a zero-stride (expanded) view legitimately repeats elements, so its
         // logical count may exceed the backing storage; materialization below
-        // repeats through stride 0 and bounds-checks every source offset. only
-        // reject when the excess is not explained by zero-stride dimensions.
+        // repeats through stride 0 and bounds-checks every source offset.
         bool has_zero_stride = false;
         for (int i = 0; i < dims; i++)
         {
@@ -366,35 +365,87 @@ static void load_tensor_data(StoreZipReader& zip, const std::vector<std::string>
                 break;
             }
         }
-        if (!has_zero_stride)
+        if (has_zero_stride)
         {
-            // meta claims more elements than the storage provides: keep raw
-            // bytes as-is (bounds-checked readers below tolerate a short buffer)
-            a.data = raw;
-            return;
-        }
-
-        // bound the expansion so a hostile meta cannot force a huge allocation:
-        // each zero-stride dim may repeat its elements at most to its declared
-        // size; a count beyond that product is not a valid expanded view
-        size_t expanded = raw_elems_total;
-        for (int i = 0; i < dims; i++)
-        {
-            if (strides[i] == 0 && sizes[i] > 1)
+            // bound the expansion so a hostile meta cannot force a huge allocation:
+            // each zero-stride dim may repeat its elements at most to its declared
+            // size; a count beyond that product is not a valid expanded view
+            size_t expanded = raw_elems_total;
+            for (int i = 0; i < dims; i++)
             {
-                if (expanded > (size_t)-1 / (size_t)sizes[i])
+                if (strides[i] == 0 && sizes[i] > 1)
+                {
+                    if (expanded > (size_t)-1 / (size_t)sizes[i])
+                    {
+                        a.data = raw;
+                        return;
+                    }
+                    expanded *= (size_t)sizes[i];
+                }
+            }
+            if (count > expanded)
+            {
+                // still more elements than any zero-stride expansion can explain
+                a.data = raw;
+                return;
+            }
+        }
+        else
+        {
+            // overlapping view with only non-zero strides: the logical element
+            // count may exceed the backing storage while every element address
+            // is still valid (e.g. base.as_strided((3,3),(1,1)) over a
+            // five-element storage, or a negative-stride flip view). materialize
+            // below repeats the overlapping reads, so only reject when an extreme
+            // reachable address escapes the storage - computed here in O(dims),
+            // before any allocation (a hostile meta can neither OOM us nor pass
+            // an out-of-range address).
+            int64_t min_addr = storage_offset;
+            int64_t max_addr = storage_offset;
+            for (int i = 0; i < dims && min_addr >= 0 && max_addr < (int64_t)raw_elems_total; i++)
+            {
+                const int64_t extent = (int64_t)sizes[i] - 1;
+                const int64_t st = (int64_t)strides[i];
+                if (extent <= 0 || st == 0)
+                    continue;
+                // safe absolute value (st == INT64_MIN would overflow -st)
+                const uint64_t as = st < 0 ? (uint64_t)(-(st + 1)) + 1 : (uint64_t)st;
+                // if this dimension alone reaches >= storage the view is OOB;
+                // compare via ceil(raw/as) so extent*as cannot overflow
+                const uint64_t need = ((uint64_t)raw_elems_total + as - 1) / as;
+                if ((uint64_t)extent >= need)
                 {
                     a.data = raw;
                     return;
                 }
-                expanded *= (size_t)sizes[i];
+                const int64_t span = extent * st;
+                if (st >= 0)
+                    max_addr += span;
+                else
+                    min_addr += span;
             }
-        }
-        if (count > expanded)
-        {
-            // still more elements than any zero-stride expansion can explain
-            a.data = raw;
-            return;
+            if (min_addr < 0 || (uint64_t)max_addr >= (uint64_t)raw_elems_total)
+            {
+                // some element address would fall outside the storage: the
+                // shape/strides are inconsistent with it; keep the raw bytes
+                // as-is (never grow it to the claimed size - that is how
+                // corrupt meta turns into a multi-gigabyte allocation)
+                a.data = raw;
+                return;
+            }
+            // in-bounds overlap is legitimate (e.g. base.as_strided((3,3),(1,1))
+            // over a five-element storage), but the materialization loop below
+            // is O(count): a pathological box wholly inside a small storage
+            // (e.g. a stride-(1,1) square) makes count quadratic in the storage
+            // size and the out-buffer allocation would OOM before any OOB check
+            // fires. only materialize a modest multiple of the storage; real
+            // overlapping views repeat a handful of elements, never a large
+            // fraction of a quadratic blowup.
+            if (raw_elems_total == 0 || count / raw_elems_total > 16)
+            {
+                a.data = raw;
+                return;
+            }
         }
     }
 

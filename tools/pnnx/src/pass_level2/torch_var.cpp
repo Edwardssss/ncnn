@@ -48,7 +48,11 @@ pnnx.Output             output      1 0 out
 
     bool match(const std::map<std::string, Parameter>& captured_params) const
     {
-        return captured_params.at("correction").type == 2;
+        // correction is an integer for var(x, dim, correction=0/1/...), but
+        // torch also accepts a fractional scalar (var(x, dim, correction=0.5))
+        // which is serialized as a float Parameter; accept both
+        int t = captured_params.at("correction").type;
+        return t == 2 || t == 3;
     }
 
     const char* type_str() const
@@ -78,7 +82,9 @@ pnnx.Output             output      1 0 out
 
     bool match(const std::map<std::string, Parameter>& captured_params) const
     {
-        return captured_params.at("correction").type == 2;
+        // accept integer and fractional corrections (see torch_var_1)
+        int t = captured_params.at("correction").type;
+        return t == 2 || t == 3;
     }
 
     const char* type_str() const
