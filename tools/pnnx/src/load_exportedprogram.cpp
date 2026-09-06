@@ -523,10 +523,12 @@ static void load_tensor_from_raw(std::vector<char> raw, const JsonValue& meta, A
 }
 
 // read one weight/constant record (raw storage bytes) from the zip into an
-// Attribute (materialization is shared via load_tensor_from_raw).
-static void load_tensor_data(StoreZipReader& zip, const std::vector<std::string>& names,
-                             const std::string& dir, const std::string& path_name,
-                             const JsonValue& meta, Attribute& a)
+// Attribute (materialization is shared via load_tensor_from_raw). returns 0 on
+// success and -1 when the referenced payload record is missing, so the caller
+// can reject an incomplete archive instead of installing an empty attribute.
+static int load_tensor_data(StoreZipReader& zip, const std::vector<std::string>& names,
+                            const std::string& dir, const std::string& path_name,
+                            const JsonValue& meta, Attribute& a)
 {
     std::string record;
     for (size_t j = 0; j < names.size(); j++)
@@ -541,7 +543,7 @@ static void load_tensor_data(StoreZipReader& zip, const std::vector<std::string>
     if (record.empty())
     {
         fprintf(stderr, "tensor record %s/%s not found\n", dir.c_str(), path_name.c_str());
-        return;
+        return -1;
     }
 
     uint64_t size = zip.get_file_size(record);
@@ -549,6 +551,7 @@ static void load_tensor_data(StoreZipReader& zip, const std::vector<std::string>
     zip.read_file(record, raw.data());
 
     load_tensor_from_raw(raw, meta, a);
+    return 0;
 }
 
 // create a prim::Constant operator and wire it as an input of the consumer
@@ -1992,7 +1995,8 @@ int load_exportedprogram(const std::string& pt2path, Graph& g,
         }
         else
         {
-            load_tensor_data(zip, names, dir, path_name, meta, a);
+            if (load_tensor_data(zip, names, dir, path_name, meta, a) != 0)
+                return -1;
         }
         return 0;
     };

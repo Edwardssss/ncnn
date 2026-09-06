@@ -100,6 +100,9 @@ void torch_rnn_pt2(Graph& graph)
         bool batch_first = false;
         int num_layers = 1;
 
+        bool train = false;
+        float dropout = 0.f;
+
         // prefer params when the frontend already parsed them
         if (op->params.count("has_biases"))
             has_biases = op->params.at("has_biases").b;
@@ -129,6 +132,23 @@ void torch_rnn_pt2(Graph& graph)
                 bidirectional = const_inputs[4]->params.at("value").b;
             if (const_inputs.size() >= 6 && const_inputs[5]->has_param("value") && const_inputs[5]->params.at("value").type == 1)
                 batch_first = const_inputs[5]->params.at("value").b;
+            // schema order (cont.): dropout is a float, train is a bool
+            if (const_inputs.size() >= 3 && const_inputs[2]->has_param("value") && const_inputs[2]->params.at("value").type == 3)
+                dropout = const_inputs[2]->params.at("value").f;
+            if (const_inputs.size() >= 4 && const_inputs[3]->has_param("value") && const_inputs[3]->params.at("value").type == 1)
+                train = const_inputs[3]->params.at("value").b;
+        }
+        if (op->params.count("train") && op->params.at("train").type == 1)
+            train = op->params.at("train").b;
+        if (op->params.count("dropout") && op->params.at("dropout").type == 3)
+            dropout = op->params.at("dropout").f;
+        if (train && dropout > 0.f)
+        {
+            // an exported training-mode RNN carries inter-layer dropout which
+            // this rewrite cannot preserve (it runs aten::rnn in eval); decline
+            // instead of silently dropping the dropout between layers
+            fprintf(stderr, "unsupported training-mode %s with nonzero dropout\n", new_type.c_str());
+            continue;
         }
 
         // validate weight count: 4 (unidirectional) or 8 (bidirectional) per
