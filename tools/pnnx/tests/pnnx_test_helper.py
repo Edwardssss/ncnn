@@ -41,18 +41,27 @@ def _pt2_expectation(exp):
     return "pass", None
 
 # optional discovery knobs:
-#   PNNX_PT2_RESULT_LOG=<file>  append "tag<TAB>result" per test_pnnx call
+#   PNNX_PT2_RESULT_LOG=<file>  append "tag<TAB>result[<TAB>exporter-error]" per
+#                              test_pnnx call; for a skip (None) the exporter
+#                              error text is appended so a diagnostic needle can
+#                              be picked from it for pt2_expectations.py
 #   PNNX_PT2_RECORD_ONLY=1      disable expectation enforcement (only record)
 _PT2_RESULT_LOG = os.environ.get("PNNX_PT2_RESULT_LOG", "")
 _PT2_RECORD_ONLY = os.environ.get("PNNX_PT2_RECORD_ONLY", "") == "1"
 
 
-def _record_pt2_result(tag, result):
+def _record_pt2_result(tag, result, err=""):
     if not _PT2_RESULT_LOG:
         return
     try:
         with open(_PT2_RESULT_LOG, "a") as f:
-            f.write("%s\t%s\n" % (tag, result))
+            f.write("%s\t%s" % (tag, result))
+            if result is None:
+                # single-line prefix of the exporter error, stable enough to
+                # pick a needle from
+                flat = " ".join((err or "").split())
+                f.write("\t%s" % flat[:200])
+            f.write("\n")
     except Exception:
         pass
 
@@ -72,6 +81,12 @@ def _check_pt2_expectation(tag, result, err=""):
             print("[pt2-expect] %s: export-skip reached but the exporter error no longer "
                   "matches the pinned diagnostic %r\n  got: %s" % (tag, needle, (err or "")[:500]))
             return False
+        if not needle:
+            # a skip recorded as a bare "export-skip" has no pinned reason; the
+            # whole pt2 channel is audited, so encourage pinning a diagnostic so
+            # a model that starts failing for a *different* reason is caught
+            print("[pt2-expect] %s: export-skip has no pinned diagnostic needle - "
+                  "add one in pt2_expectations.py" % tag)
         return None
     # conversion ran: a previously-recorded export-skip that now passes is a
     # stale table entry (improvement) - keep passing but make it visible
@@ -82,7 +97,7 @@ def _check_pt2_expectation(tag, result, err=""):
 
 
 def _finalize_pt2(tag, result, err=""):
-    _record_pt2_result(tag, result)
+    _record_pt2_result(tag, result, err)
     return _check_pt2_expectation(tag, result, err)
 
 

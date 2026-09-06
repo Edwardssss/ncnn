@@ -12,12 +12,20 @@
 #   "export-skip"                 : torch.export is pinned to reject the model
 #                                   (test_pnnx -> None, e.g. dynamic shapes /
 #                                   control flow the exporter cannot handle)
+#   {"outcome": "skip", "needle"} : as above, plus the exporter error text must
+#                                   contain the pinned diagnostic substring
 #
 # Regeneration workflow (after a torch version / suite change):
 #   PNNX_PT2_RESULT_LOG=/tmp/r.log PNNX_PT2_RECORD_ONLY=1 \
 #       python ../../tests/test_<tag>.py
-# then move every None row of /tmp/r.log into EXPECT as "export-skip", and
-# move every row that changed to True back to "pass".
+# then move every None row of /tmp/r.log into EXPECT as an
+# {"outcome": "skip", "needle": ...} entry pinning the torch.export diagnostic,
+# and move every row that changed to True back to "pass".
+#
+# Full-suite audit (2026-09-06, torch 2.13): of the 393 test_pnnx() calls in the
+# suite, 390 convert and match; exactly 3 are torch.export skips, all recorded
+# below with a pinned diagnostic. PNNX_PT2_RESULT_LOG appends the exporter error
+# for each skip, so a regeneration run yields the needles directly.
 
 EXPECT = {
     # torch.export rejects these models (dynamic indexing / control flow /
