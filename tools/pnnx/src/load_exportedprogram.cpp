@@ -1146,6 +1146,22 @@ static void append_default_kwargs(Graph& g, Operator* op, const std::string& typ
         if (!has_input_name(inputnames, "max"))
             add_const("max", Parameter());
     }
+    else if (type == "aten::arange" || type == "aten::arange.start" || type == "aten::arange.start_step")
+    {
+        // dynamo omits the dtype default (None) from aten::arange, leaving
+        // [end device pin_memory] (or the start/start_step variants) which
+        // matches no torch_arange level-2 pattern and survives to codegen as an
+        // invalid "aten::arange(...)" python line; restore the canonical order
+        // the pt2 torch_arange_5/6/7 patterns expect
+        if (!has_input_name(inputnames, "dtype"))
+            add_const("dtype", Parameter());
+        if (type == "aten::arange.start_step")
+            reorder_inputs({"start", "end", "step", "dtype", "device", "pin_memory"});
+        else if (type == "aten::arange.start")
+            reorder_inputs({"start", "end", "dtype", "device", "pin_memory"});
+        else
+            reorder_inputs({"end", "dtype", "device", "pin_memory"});
+    }
     else if (type == "aten::zeros" || type == "aten::ones")
     {
         // dynamo omits the dtype default (None) from aten::zeros/ones, leaving
