@@ -279,6 +279,28 @@ pnnx.Output             output      1 0 out
                 p[2 * i + 1] = im;
             }
         }
+        else if (a.type == 12) // complex32 (2 x f16)
+        {
+            float re, im;
+            if (fill_value.type == 10)
+            {
+                re = (float)fill_value.c.real();
+                im = (float)fill_value.c.imag();
+            }
+            else
+            {
+                re = (float)fv;
+                im = 0.f;
+            }
+            const unsigned short r = float32_to_float16(re);
+            const unsigned short i = float32_to_float16(im);
+            unsigned short* p = (unsigned short*)d;
+            for (size_t k = 0; k < count; k++)
+            {
+                p[2 * k] = r;
+                p[2 * k + 1] = i;
+            }
+        }
         else // unsupported dtype safety fallback
         {
             memset(d, 0, count * es);
@@ -455,6 +477,28 @@ pnnx.Output             output      1 0 out
             {
                 p[2 * i] = re;
                 p[2 * i + 1] = im;
+            }
+        }
+        else if (a.type == 12) // complex32 (2 x f16)
+        {
+            float re, im;
+            if (fill_value.type == 10)
+            {
+                re = (float)fill_value.c.real();
+                im = (float)fill_value.c.imag();
+            }
+            else
+            {
+                re = (float)fv;
+                im = 0.f;
+            }
+            const unsigned short r = float32_to_float16(re);
+            const unsigned short i = float32_to_float16(im);
+            unsigned short* p = (unsigned short*)d;
+            for (size_t k = 0; k < count; k++)
+            {
+                p[2 * k] = r;
+                p[2 * k + 1] = i;
             }
         }
         else // unsupported dtype safety fallback

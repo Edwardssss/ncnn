@@ -21,20 +21,28 @@ void insert_reshape_linear(Graph& graph)
             if (op->type != "nn.Linear")
                 continue;
 
-            int input_rank = op->inputs[0]->shape.size();
+            Operand* linear_in = op->inputs[0];
+            int input_rank = linear_in->shape.size();
             if (input_rank == 0)
                 continue;
+
+            int ncnn_batch_axis = 233; // 233 = no explicit batch axis
+            if (linear_in->params.find("__ncnn_batch_axis") != linear_in->params.end())
+                ncnn_batch_axis = linear_in->params.at("__ncnn_batch_axis").i;
 
             // nn.Linear    4d-2d-4d
             // nn.Linear    5d-2d-5d
             // nn.Linear    3d(S,B,F) batch>1 -> 2d -> 3d ((S,B,F) layout, batch on dim1)
-            // note the (B,S,F) layout (batch on dim0) must not trigger; distinguish by shape[0]>1 && shape[1]>1
+            // the (B,S,F) layout has its batch extracted on axis 0
+            // (ncnn_batch_axis == 0) and must not take this 3-D flatten path:
+            // after extraction every physical blob is 2-D, so folding B into
+            // the pre-Gemm height would request more elements than are present
             bool insert_reshape = false;
             if (op->type == "nn.Linear" && (input_rank == 4 || input_rank == 5))
             {
                 insert_reshape = true;
             }
-            if (op->type == "nn.Linear" && input_rank == 3 && op->inputs[0]->shape.size() >= 2 && op->inputs[0]->shape[0] > 1 && op->inputs[0]->shape[1] > 1)
+            if (op->type == "nn.Linear" && input_rank == 3 && linear_in->shape.size() >= 2 && linear_in->shape[0] > 1 && linear_in->shape[1] > 1 && ncnn_batch_axis != 0)
             {
                 insert_reshape = true;
             }
@@ -44,11 +52,9 @@ void insert_reshape_linear(Graph& graph)
 
             matched = true;
 
-            Operand* linear_in = op->inputs[0];
             Operand* linear_out = op->outputs[0];
 
             const int batch_index = linear_in->params["__batch_index"].i;
-            const int ncnn_batch_axis = linear_in->params["__ncnn_batch_axis"].i;
 
             Operator* reshape0 = graph.new_operator_before("Tensor.reshape", op->name + "_ncnnreshape0", op);
             Operator* reshape1 = graph.new_operator_after("Tensor.reshape", op->name + "_ncnnreshape1", op);
@@ -87,6 +93,8 @@ void insert_reshape_linear(Graph& graph)
             int reshape_h = 1;
             for (size_t j = 0; j < linear_in->shape.size() - 1; j++)
             {
+                if ((int)j == ncnn_batch_axis)
+                    continue; // the extracted batch axis is not in each blob
                 if (linear_in->shape[j] == -1)
                 {
                     reshape_h = -1;

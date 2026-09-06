@@ -2125,6 +2125,8 @@ int load_exportedprogram(const std::string& pt2path, Graph& g,
                         r->type = 8;
                     else if (t == "bf16")
                         r->type = 13;
+                    else if (t == "c32")
+                        r->type = 12;
                     else if (t == "c64")
                         r->type = 10;
                     else if (t == "c128")
