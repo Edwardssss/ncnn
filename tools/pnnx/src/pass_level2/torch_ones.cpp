@@ -94,6 +94,17 @@ static void fill_ones(Attribute& a)
             p[i * 2 + 1] = 0.0;
         }
     }
+    else if (a.type == 12) // complex32 (2 x f16)
+    {
+        const unsigned short r = float32_to_float16(1.f);
+        const unsigned short z = float32_to_float16(0.f);
+        unsigned short* p = (unsigned short*)d;
+        for (size_t i = 0; i < count; i++)
+        {
+            p[i * 2] = r;
+            p[i * 2 + 1] = z;
+        }
+    }
 }
 
 class torch_ones : public GraphRewriterPass

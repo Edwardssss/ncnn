@@ -307,6 +307,24 @@ static void load_tensor_data(StoreZipReader& zip, const std::vector<std::string>
     const int dims = (int)sizes.size();
     if (dims == 0 || strides.size() != sizes.size())
     {
+        if (dims == 0 && strides.empty())
+        {
+            // rank-zero scalar that is a view into a shared storage (e.g.
+            // base[3]): empty sizes/strides with a nonzero storage_offset are
+            // valid metadata selecting one element. keep just that element so
+            // the scalar attribute reads the selected storage slot instead of
+            // the whole backing storage (which would read element 0).
+            const int es = (int)a.elemsize();
+            if (es > 0 && storage_offset >= 0 && raw.size() >= (size_t)es)
+            {
+                const uint64_t off = (uint64_t)storage_offset * (uint64_t)es;
+                if (off <= raw.size() - (size_t)es)
+                {
+                    a.data.assign(raw.begin() + (size_t)off, raw.begin() + (size_t)off + (size_t)es);
+                    return;
+                }
+            }
+        }
         // no usable tensor_meta: keep the raw storage bytes as-is
         a.data = raw;
         return;
@@ -2313,13 +2331,24 @@ int load_exportedprogram(const std::string& pt2path, Graph& g,
                 }
                 else if (arg.has("as_int"))
                 {
-                    // INT64_MAX is dynamo's "to the end" sentinel for slice etc., map to pnnx INT_MAX
+                    // INT64_MAX/MIN are dynamo's "to the end" sentinels for slice
+                    // etc., map to pnnx INT_MAX/INT_MIN
                     long long iv = arg["as_int"].as_int();
                     if (iv == std::numeric_limits<long long>::max())
                         iv = INT_MAX;
                     if (iv == std::numeric_limits<long long>::min())
                         iv = INT_MIN;
-                    new_constant(g, op, (long long)iv, constant_index);
+                    if (iv > INT_MAX || iv < INT_MIN)
+                    {
+                        // pnnx Parameter stores integers as int32; an exported
+                        // 64-bit scalar beyond that range (e.g. a torch.full fill
+                        // value of 1<<40) would be silently truncated by the
+                        // Parameter(long long) narrowing and change the model
+                        // result - reject it explicitly instead
+                        fprintf(stderr, "unsupported 64-bit integer argument %lld in node %s\n", iv, op_type.c_str());
+                        return -1;
+                    }
+                    new_constant(g, op, (int)iv, constant_index);
                 }
                 else if (arg.has("as_ints"))
                 {
@@ -2331,6 +2360,13 @@ int load_exportedprogram(const std::string& pt2path, Graph& g,
                             v = INT_MAX;
                         if (v == std::numeric_limits<long long>::min())
                             v = INT_MIN;
+                        if (v > INT_MAX || v < INT_MIN)
+                        {
+                            // see the as_int branch above: reject out-of-range
+                            // 64-bit scalars instead of truncating them
+                            fprintf(stderr, "unsupported 64-bit integer argument %lld in node %s\n", v, op_type.c_str());
+                            return -1;
+                        }
                         ai.push_back((int)v);
                     }
                     new_constant(g, op, ai, constant_index);
