@@ -35,13 +35,23 @@ FIXTURES = {
     "linear_params_pt2_7": "[4,8]",
     # nn.Linear parameters + a tensor_constant
     "linear_const_pt2_7": "[4,8]",
+    # conv + batchnorm: conv weights + a pile of buffers
+    "conv_bn_params_pt2_7": "[1,1,8,8]",
+    # bfloat16 weights
+    "bf16_weights_pt2_7": "[4,8]",
+    # float16 weights
+    "f16_weights_pt2_7": "[4,8]",
+    # int64 buffer + int64 tensor attribute
+    "i64_values_pt2_7": "[4,8]",
 }
 
+# type string -> (element size in bytes, numpy dtype); bf16 has no numpy dtype
+# and is decoded via bit manipulation in _decode_float
 TYPE_ELEMSIZE = {
     "f32": (4, np.float32),
     "f64": (8, np.float64),
     "f16": (2, np.float16),
-    "bf16": (2, np.float16),  # compared via float32 below
+    "bf16": (2, None),
     "i8": (1, np.int8),
     "u8": (1, np.uint8),
     "i16": (2, np.int16),
@@ -49,6 +59,14 @@ TYPE_ELEMSIZE = {
     "i64": (8, np.int64),
     "bool": (1, np.bool_),
 }
+
+
+def _decode_float(data, tstr, shape):
+    """decode a float attribute payload into a float64 tensor of the given shape."""
+    if tstr == "bf16":
+        u = np.frombuffer(data, dtype=np.uint16).astype(np.uint32)
+        return (u << 16).view(np.float32).reshape(shape).astype(np.float64)
+    return np.frombuffer(data, dtype=TYPE_ELEMSIZE[tstr][1]).reshape(shape).astype(np.float64)
 
 
 def torch_dtype_to_str(dt):
@@ -160,7 +178,7 @@ def compare(name, xshape):
             last_key = ""
             for key, data in cand:
                 if t.is_floating_point():
-                    got = np.frombuffer(data, dtype=TYPE_ELEMSIZE[tstr][1]).astype(np.float64).reshape(t.shape)
+                    got = _decode_float(data, tstr, tuple(t.shape))
                     exp = t.double().numpy()
                     md = float(np.abs(got - exp).max())
                     last_md = md

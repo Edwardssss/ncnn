@@ -29,3 +29,7 @@ fixed seeds:
 |---|---|---|
 | `linear_params_pt2_7.pt2` | `F.linear` + persistent buffer + non-persistent buffer | weights + constants payloads, parameter/buffer classification |
 | `linear_const_pt2_7.pt2` | `nn.Linear` + tensor attribute | tensor_constant payload |
+| `conv_bn_params_pt2_7.pt2` | `nn.Conv2d` + `nn.BatchNorm2d` | conv weights + many buffers |
+| `bf16_weights_pt2_7.pt2` | `nn.Linear(..., dtype=torch.bfloat16)` | bfloat16 weight decode |
+| `f16_weights_pt2_7.pt2` | `nn.Linear(..., dtype=torch.float16)` | float16 weight decode |
+| `i64_values_pt2_7.pt2` | int64 buffer + int64 tensor attribute | integer dtype decode |
