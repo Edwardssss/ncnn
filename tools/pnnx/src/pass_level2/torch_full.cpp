@@ -201,7 +201,9 @@ pnnx.Output             output      1 0 out
             unsigned int bits;
             float f = (float)fv;
             memcpy(&bits, &f, 4);
-            const unsigned short v = (unsigned short)((bits + 0x8000) >> 16);
+            // round-to-nearest-even to match torch's float -> bfloat16 cast
+            const unsigned int rounded = bits + 0x7fff + ((bits >> 16) & 1);
+            const unsigned short v = (unsigned short)(rounded >> 16);
             unsigned short* p = (unsigned short*)d;
             for (size_t i = 0; i < count; i++)
                 p[i] = v;
@@ -237,7 +239,47 @@ pnnx.Output             output      1 0 out
         {
             memset(d, fv ? 1 : 0, count);
         }
-        else // fallback (complex etc. kept simple)
+        else if (a.type == 10) // complex64: real part is fill_value, imag is 0
+        {
+            float re, im;
+            if (fill_value.type == 10)
+            {
+                re = fill_value.c.real();
+                im = fill_value.c.imag();
+            }
+            else
+            {
+                re = (float)fv;
+                im = 0.f;
+            }
+            float* p = (float*)d;
+            for (size_t i = 0; i < count; i++)
+            {
+                p[2 * i] = re;
+                p[2 * i + 1] = im;
+            }
+        }
+        else if (a.type == 11) // complex128
+        {
+            double re, im;
+            if (fill_value.type == 10)
+            {
+                re = fill_value.c.real();
+                im = fill_value.c.imag();
+            }
+            else
+            {
+                re = fv;
+                im = 0.;
+            }
+            double* p = (double*)d;
+            for (size_t i = 0; i < count; i++)
+            {
+                p[2 * i] = re;
+                p[2 * i + 1] = im;
+            }
+        }
+        else // unsupported dtype safety fallback
         {
             memset(d, 0, count * es);
         }
@@ -337,7 +379,9 @@ pnnx.Output             output      1 0 out
             unsigned int bits;
             float f = (float)fv;
             memcpy(&bits, &f, 4);
-            const unsigned short v = (unsigned short)((bits + 0x8000) >> 16);
+            // round-to-nearest-even to match torch's float -> bfloat16 cast
+            const unsigned int rounded = bits + 0x7fff + ((bits >> 16) & 1);
+            const unsigned short v = (unsigned short)(rounded >> 16);
             unsigned short* p = (unsigned short*)d;
             for (size_t i = 0; i < count; i++)
                 p[i] = v;
@@ -373,7 +417,47 @@ pnnx.Output             output      1 0 out
         {
             memset(d, fv ? 1 : 0, count);
         }
-        else
+        else if (a.type == 10) // complex64: real part is fill_value, imag is 0
+        {
+            float re, im;
+            if (fill_value.type == 10)
+            {
+                re = fill_value.c.real();
+                im = fill_value.c.imag();
+            }
+            else
+            {
+                re = (float)fv;
+                im = 0.f;
+            }
+            float* p = (float*)d;
+            for (size_t i = 0; i < count; i++)
+            {
+                p[2 * i] = re;
+                p[2 * i + 1] = im;
+            }
+        }
+        else if (a.type == 11) // complex128
+        {
+            double re, im;
+            if (fill_value.type == 10)
+            {
+                re = fill_value.c.real();
+                im = fill_value.c.imag();
+            }
+            else
+            {
+                re = fv;
+                im = 0.;
+            }
+            double* p = (double*)d;
+            for (size_t i = 0; i < count; i++)
+            {
+                p[2 * i] = re;
+                p[2 * i + 1] = im;
+            }
+        }
+        else // unsupported dtype safety fallback
         {
             memset(d, 0, count * es);
         }

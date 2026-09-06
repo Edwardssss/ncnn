@@ -1,7 +1,10 @@
 #!/bin/bash
 # pnnx pt2 parsing path zero-third-party-dependency check
 # verifies new C++ files only include pnnx internal headers and the C++ stdlib
-SRC=/home/edwards/tx_opensource/ncnn/tools/pnnx/src
+# derive the pnnx source dir from this script's location so the check works on
+# any checkout (not just the author's machine)
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+SRC="$SCRIPT_DIR/../src"
 
 files=(
     "$SRC/load_exportedprogram.cpp"
