@@ -97,6 +97,31 @@ static int serde_dtype_to_pnnx_dtype_value(int64_t dtype)
     }
 }
 
+// scalar-dtype handling helpers: reject a serde ScalarType with no pnnx
+// representation instead of silently emitting a bogus 0/-1 constant (mirrors
+// the tensor/weight dtype rejection used when materializing attributes)
+static bool scalar_dtype_to_pnnx_type(int64_t serde_dtype, int& pnnx_type)
+{
+    pnnx_type = serde_dtype_to_pnnx_type(serde_dtype);
+    if (pnnx_type <= 0)
+    {
+        fprintf(stderr, "unsupported scalar dtype %lld\n", (long long)serde_dtype);
+        return false;
+    }
+    return true;
+}
+
+static bool scalar_dtype_to_pnnx_dtype_value(int64_t serde_dtype, int& dtype_value)
+{
+    dtype_value = serde_dtype_to_pnnx_dtype_value(serde_dtype);
+    if (dtype_value < 0)
+    {
+        fprintf(stderr, "unsupported scalar dtype %lld\n", (long long)serde_dtype);
+        return false;
+    }
+    return true;
+}
+
 // torch serde MemoryFormat -> pnnx memory_format enum
 //   serde: 0=none 1=contiguous 2=channels_last 3=channels_last_3d 4=preserve
 //   pnnx enum (see pass_level2/Tensor_to.cpp): 0=contiguous 1=preserve 2=channels_last
@@ -1504,10 +1529,12 @@ static int build_subgraph_nodes(Graph& g, const JsonValue& subgraph,
                 else if (arg.has("as_scalar_type"))
                 {
                     // hann/hamming_window carry a dtype override (e.g.
-                    // float64); keep it so the level2 fold can honor it
-                    int pnnx_type = serde_dtype_to_pnnx_type(arg["as_scalar_type"].as_int());
-                    if (pnnx_type > 0)
-                        op->params[argname] = pnnx_type;
+                    // float64); keep it so the level2 fold can honor it; an
+                    // unrepresentable scalar dtype is rejected, not dropped
+                    int pnnx_type = 0;
+                    if (!scalar_dtype_to_pnnx_type(arg["as_scalar_type"].as_int(), pnnx_type))
+                        return -1;
+                    op->params[argname] = pnnx_type;
                 }
                 else if (arg.has("as_float"))
                 {
@@ -1568,7 +1595,10 @@ static int build_subgraph_nodes(Graph& g, const JsonValue& subgraph,
             }
             else if (arg.has("as_scalar_type"))
             {
-                new_constant(g, op, serde_dtype_to_pnnx_dtype_value(arg["as_scalar_type"].as_int()), constant_index);
+                int dtype_value = 0;
+                if (!scalar_dtype_to_pnnx_dtype_value(arg["as_scalar_type"].as_int(), dtype_value))
+                    return -1;
+                new_constant(g, op, dtype_value, constant_index);
             }
             else if (arg.has("as_tensors"))
             {
@@ -1781,17 +1811,20 @@ int load_exportedprogram(const std::string& pt2path, Graph& g,
     // tensor_values : name -> { dtype, sizes, ... }
     const JsonValue& tensor_values = graph["tensor_values"];
 
-    // uint16 (serde ScalarType 28) has no pnnx representation: reject it
-    // explicitly instead of decoding 2-byte elements as 1-byte u8, which would
-    // silently truncate or misalign every weight/constant using that dtype
+    // some serde ScalarTypes have no pnnx representation (uint16=28, float8
+    // variants, ...): reject them explicitly instead of decoding with the wrong
+    // element size (uint16 as 1-byte u8 would silently truncate/misalign every
+    // weight/constant using that dtype) or materializing a type-0 attribute
     {
         std::string reject_fqn;
+        int64_t reject_dtype = -1;
         for (std::map<std::string, std::pair<std::string, JsonValue> >::const_iterator it = weights.begin(); it != weights.end(); ++it)
         {
             const JsonValue& meta = it->second.second;
-            if (meta.is_object() && meta.has("dtype") && meta["dtype"].as_int() == 28)
+            if (meta.is_object() && meta.has("dtype") && serde_dtype_to_pnnx_type(meta["dtype"].as_int()) == 0)
             {
                 reject_fqn = it->first;
+                reject_dtype = meta["dtype"].as_int();
                 break;
             }
         }
@@ -1800,16 +1833,20 @@ int load_exportedprogram(const std::string& pt2path, Graph& g,
             for (std::map<std::string, std::pair<std::string, JsonValue> >::const_iterator it = constants.begin(); it != constants.end(); ++it)
             {
                 const JsonValue& meta = it->second.second;
-                if (meta.is_object() && meta.has("dtype") && meta["dtype"].as_int() == 28)
+                if (meta.is_object() && meta.has("dtype") && serde_dtype_to_pnnx_type(meta["dtype"].as_int()) == 0)
                 {
                     reject_fqn = it->first;
+                    reject_dtype = meta["dtype"].as_int();
                     break;
                 }
             }
         }
         if (!reject_fqn.empty())
         {
-            fprintf(stderr, "unsupported dtype uint16 for tensor '%s'\n", reject_fqn.c_str());
+            if (reject_dtype == 28)
+                fprintf(stderr, "unsupported dtype uint16 for tensor '%s'\n", reject_fqn.c_str());
+            else
+                fprintf(stderr, "unsupported dtype %lld for tensor '%s'\n", (long long)reject_dtype, reject_fqn.c_str());
             return -1;
         }
     }
@@ -2161,10 +2198,12 @@ int load_exportedprogram(const std::string& pt2path, Graph& g,
                 else if (arg.has("as_scalar_type"))
                 {
                     // hann/hamming_window carry a dtype override (e.g.
-                    // float64); keep it so the level2 fold can honor it
-                    int pnnx_type = serde_dtype_to_pnnx_type(arg["as_scalar_type"].as_int());
-                    if (pnnx_type > 0)
-                        op->params[argname] = pnnx_type;
+                    // float64); keep it so the level2 fold can honor it; an
+                    // unrepresentable scalar dtype is rejected, not dropped
+                    int pnnx_type = 0;
+                    if (!scalar_dtype_to_pnnx_type(arg["as_scalar_type"].as_int(), pnnx_type))
+                        return -1;
+                    op->params[argname] = pnnx_type;
                 }
                 else if (arg.has("as_float"))
                 {
@@ -2261,8 +2300,12 @@ int load_exportedprogram(const std::string& pt2path, Graph& g,
                 }
                 else if (arg.has("as_scalar_type"))
                 {
-                    // serde ScalarType enum -> pnnx dtype input enum
-                    new_constant(g, op, serde_dtype_to_pnnx_dtype_value(arg["as_scalar_type"].as_int()), constant_index);
+                    // serde ScalarType enum -> pnnx dtype input enum; reject a
+                    // dtype with no pnnx representation instead of a bogus -1
+                    int dtype_value = 0;
+                    if (!scalar_dtype_to_pnnx_dtype_value(arg["as_scalar_type"].as_int(), dtype_value))
+                        return -1;
+                    new_constant(g, op, dtype_value, constant_index);
                 }
                 else if (arg.has("as_device"))
                 {

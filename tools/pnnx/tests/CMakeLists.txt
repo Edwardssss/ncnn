@@ -191,6 +191,7 @@ pnnx_add_test(Tensor_view)
 pnnx_add_test(pnnx_model_stat)
 pnnx_add_test(pt2_dict_input)
 pnnx_add_test(pt2_dict_output)
+pnnx_add_test(pt2_weight_dtype)
 
 pnnx_add_test(torch_addmm)
 pnnx_add_test(torch_amax)
