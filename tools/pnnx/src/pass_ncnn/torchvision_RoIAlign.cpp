@@ -45,7 +45,10 @@ pnnx.Output             output      1 0 out
         Operator* rois_op = op0->inputs[1]->producer;
         if (!rois_op || rois_op->type != "pnnx.Attribute" || rois_op->attrs.empty())
             return false; // dynamic rois: keep the torchvision op untouched
-
+        // write() trims the leading batch index in place; declining keeps a
+        // shared constant from being mutated for every consumer
+        if (!rois_op->outputs.empty() && rois_op->outputs[0]->consumers.size() > 1)
+            return false;
         const Attribute& a = rois_op->attrs.begin()->second;
         if (a.elemcount() != 5)
             return false; // only a single ROI is supported

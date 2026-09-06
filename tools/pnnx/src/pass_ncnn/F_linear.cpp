@@ -16,8 +16,10 @@ void convert_aten_F_linear(Graph& graph)
         if (op->type != "F.linear")
             continue;
 
-        // 3 inputs: input, weight, bias
-        if (op->inputs.size() != 3)
+        // 2 or 3 inputs: input, weight[, bias]. a pt2 F.linear exported with
+        // bias=None folds the None bias into a bias=None parameter, leaving a
+        // two-tensor node (lowered as Gemm without C)
+        if (op->inputs.size() != 2 && op->inputs.size() != 3)
         {
             fprintf(stderr, "unsupported F.linear input count %zu\n", op->inputs.size());
             continue;
@@ -43,10 +45,18 @@ void convert_aten_F_linear(Graph& graph)
             Operand* fl_in = op->inputs[0];
             Operand* fl_out = op->outputs[0];
 
-            // reshape_h = product of the first rank-1 dims (1 for 1D input)
+            // reshape_h = product of the first rank-1 dims (1 for 1D input).
+            // when the input's logical axis 0 is the ncnn batch axis, that
+            // axis has already been extracted from every runtime blob, so it
+            // must not be folded into the per-sample flatten height
+            int batch_axis = 233; // 233 = no explicit batch axis
+            if (fl_in->params.find("__ncnn_batch_axis") != fl_in->params.end())
+                batch_axis = fl_in->params.at("__ncnn_batch_axis").i;
             int reshape_h = 1;
             for (int j = 0; j < rank - 1; j++)
             {
+                if (j == batch_axis)
+                    continue;
                 if (in_shape[j] == -1)
                 {
                     reshape_h = -1;

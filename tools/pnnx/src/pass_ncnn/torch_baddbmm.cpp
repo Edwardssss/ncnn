@@ -15,12 +15,39 @@ void convert_aten_baddbmm(Graph& graph)
     {
         Operator* op = graph.ops[i];
 
-        if (op->type != "aten::baddbmm")
+        // pass_level2 normalizes the 5-input aten::baddbmm to torch.baddbmm
+        // (constant folding leaves the three tensor inputs plus alpha/beta
+        // params); the bare 3-input aten::baddbmm stays as-is. accept both.
+        if (op->type != "aten::baddbmm" && op->type != "torch.baddbmm")
             continue;
 
         // 3-input variant: self, batch1, batch2 (beta=1, alpha=1) -> self + batch1 @ batch2
         if (op->inputs.size() != 3)
             continue;
+
+        // torch.baddbmm carries folded alpha/beta params; only the unit form
+        // maps to mm + add, so decline any explicit scaling instead of
+        // silently dropping it
+        if (op->type == "torch.baddbmm")
+        {
+            float alpha = 1.f;
+            float beta = 1.f;
+            if (op->params.count("alpha"))
+            {
+                const Parameter& p = op->params.at("alpha");
+                alpha = p.type == 3 ? p.f : (p.type == 2 ? (float)p.i : 1.f);
+            }
+            if (op->params.count("beta"))
+            {
+                const Parameter& p = op->params.at("beta");
+                beta = p.type == 3 ? p.f : (p.type == 2 ? (float)p.i : 1.f);
+            }
+            if (alpha != 1.f || beta != 1.f)
+            {
+                fprintf(stderr, "unsupported baddbmm alpha=%f beta=%f scaling\n", alpha, beta);
+                continue;
+            }
+        }
 
         Operand* self = op->inputs[0];
         Operand* batch1 = op->inputs[1];
