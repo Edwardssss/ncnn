@@ -27,7 +27,19 @@ import torch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIXDIR = os.path.join(HERE, "fixtures", "pt2_legacy")
-PNNX = os.path.join("..", "src", "pnnx")
+
+
+def _find_pnnx():
+    # the binary is pnnx.exe on Windows and pnnx elsewhere; subprocess (list
+    # form) does not go through the shell's PATHEXT lookup, so probe explicitly
+    for name in ("pnnx.exe", "pnnx"):
+        p = os.path.join("..", "src", name)
+        if os.path.exists(p):
+            return p
+    return os.path.join("..", "src", "pnnx")
+
+
+PNNX = _find_pnnx()
 
 # name -> inputshape (mirrors the exporter call in the fixture generator)
 FIXTURES = {
