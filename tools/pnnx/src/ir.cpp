@@ -67,7 +67,10 @@ static const char* type_to_numpy_string(int type)
     if (type == 9) return "bool";
     if (type == 10) return "csingle";
     if (type == 11) return "cdouble";
-    if (type == 12) return "chalf";
+    // numpy has no complex-half storage dtype (and no bfloat16 one), so the
+    // generated loader decodes these two from their raw words instead of
+    // passing the name to np.memmap
+    if (type == 12) return "complex32";
     if (type == 13) return "bfloat16";
     return "null";
 }
@@ -1759,9 +1762,10 @@ int Graph::python(const std::string& pypath, const std::string& pnnxbinpath, con
 
             if (is_empty)
             {
-                if (attr.type == 13)
+                if (attr.type == 13 || attr.type == 12)
                 {
-                    // numpy has no native bfloat16, use torch.empty directly
+                    // numpy has no native bfloat16 and no complex-half
+                    // storage, so allocate those two through torch directly
                     fprintf(pyfp, "        self.%s_%s = torch.empty((", sanitize_identifier(op->name).c_str(), sanitize_identifier(key).c_str());
 
                     for (size_t i = 0; i < attr.shape.size(); i++)
@@ -1769,7 +1773,7 @@ int Graph::python(const std::string& pypath, const std::string& pnnxbinpath, con
                         fprintf(pyfp, "%d,", attr.shape[i]);
                     }
 
-                    fprintf(pyfp, "), dtype=torch.bfloat16)\n");
+                    fprintf(pyfp, "), dtype=%s)\n", attr.type == 13 ? "torch.bfloat16" : "torch.complex32");
                 }
                 else
                 {
@@ -1829,6 +1833,12 @@ int Graph::python(const std::string& pypath, const std::string& pnnxbinpath, con
         fprintf(pyfp, "            m = np.memmap(tmppath, dtype='int16', mode='r', shape=shape).copy()\n");
         fprintf(pyfp, "            os.remove(tmppath)\n");
         fprintf(pyfp, "            return torch.from_numpy(m).view(torch.bfloat16)\n");
+        fprintf(pyfp, "        if dtype == 'complex32':\n");
+        fprintf(pyfp, "            # numpy has no complex-half storage; read the two float16 components and reinterpret (bit-preserving)\n");
+        fprintf(pyfp, "            m = np.memmap(tmppath, dtype='int16', mode='r', shape=shape + (2,)).copy()\n");
+        fprintf(pyfp, "            os.remove(tmppath)\n");
+        fprintf(pyfp, "            # viewing as complex32 halves the last dim instead of dropping it\n");
+        fprintf(pyfp, "            return torch.from_numpy(m).view(torch.float16).view(torch.complex32).reshape(shape)\n");
         fprintf(pyfp, "        m = np.memmap(tmppath, dtype=dtype, mode='r', shape=shape).copy()\n");
         fprintf(pyfp, "        os.remove(tmppath)\n");
         fprintf(pyfp, "        return torch.from_numpy(m)\n");
