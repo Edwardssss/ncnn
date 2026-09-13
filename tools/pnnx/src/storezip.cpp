@@ -407,9 +407,15 @@ static int deflate_inflate_stream(DeflateBitReader& br, unsigned char* out, size
             hdist += 1;
             hclen += 4;
 
-            // RFC1951 caps: HLIT in 257..286, HDIST in 1..30. a hostile header
-            // (HLIT=288, HDIST=32) would overflow all_lengths below, so reject
-            // it before decoding instead of writing past the stack array
+            // RFC1951 encodes HLIT as 5 bits (257..288) and HDIST as 5 bits
+            // (1..32), but caps the usable ranges at 286 literal/length and 30
+            // distance codes. the reference inflate implementation (zlib, and
+            // therefore minizip and every zip writer built on it) rejects
+            // nlen > 286 / ndist > 30 with "too many length or distance
+            // symbols", so accepting 287/288 or 31/32 here would read archives
+            // no other zip tool can read. a hostile header (HLIT=288,
+            // HDIST=32) would also overflow all_lengths below, so reject it
+            // before decoding instead of writing past the stack array
             if (hlit > 286 || hdist > 30)
                 return -1;
 
