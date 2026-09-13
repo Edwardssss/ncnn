@@ -59,7 +59,7 @@ static bool read_as_double(const Attribute& a, std::vector<double>& out)
 // taken over all coords except dim (norm_except_dim); dim=-1 means the norm
 // over all coords (scalar). templated so an f64 weight is folded in double
 // precision instead of being narrowed to f32 and widened back.
-template <typename T>
+template<typename T>
 static void fold_weight_norm(const std::vector<int>& v_shape, const std::vector<int>& g_shape, bool g_is_scalar, int dim, const std::vector<T>& v, const std::vector<T>& g, std::vector<T>& weight)
 {
     const int dims = (int)v_shape.size();
