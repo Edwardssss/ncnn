@@ -20,6 +20,7 @@ inline size_t fold_elemsize(int type)
     if (type == 7 || type == 8 || type == 9) es = 1;  // i8/u8/bool
     if (type == 10) es = 8;                           // complex64 (2 x f32)
     if (type == 11) es = 16;                          // complex128 (2 x f64)
+    if (type == 12) es = 4;                           // complex32 (2 x f16)
     return es;
 }
 
