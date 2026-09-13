@@ -1313,13 +1313,21 @@ int load_exportedprogram(const std::string& pt2path, Graph& g,
                 }
                 else if (arg.has("as_int"))
                 {
-                    // INT64_MAX/MIN are dynamo's "to the end" sentinels for slice
-                    // etc., map to pnnx INT_MAX/INT_MIN
+                    // INT64_MAX/MIN are dynamo's "to the end" sentinels for the
+                    // slice bounds, mapped to pnnx INT_MAX/INT_MIN. any other
+                    // integer argument keeps its own value, so a genuine
+                    // torch.full(..., 9223372036854775807, dtype=torch.int64)
+                    // is rejected below instead of being silently replaced by
+                    // the sentinel's value.
+                    const bool is_slice_bound = (argname == "start" || argname == "end");
                     long long iv = arg["as_int"].as_int();
-                    if (iv == std::numeric_limits<long long>::max())
-                        iv = INT_MAX;
-                    if (iv == std::numeric_limits<long long>::min())
-                        iv = INT_MIN;
+                    if (is_slice_bound)
+                    {
+                        if (iv == std::numeric_limits<long long>::max())
+                            iv = INT_MAX;
+                        if (iv == std::numeric_limits<long long>::min())
+                            iv = INT_MIN;
+                    }
                     if (iv > INT_MAX || iv < INT_MIN)
                     {
                         // pnnx Parameter stores integers as int32; an exported
@@ -1334,14 +1342,18 @@ int load_exportedprogram(const std::string& pt2path, Graph& g,
                 }
                 else if (arg.has("as_ints"))
                 {
+                    const bool is_slice_bound = (argname == "start" || argname == "end");
                     std::vector<int> ai;
                     for (size_t k = 0; k < arg["as_ints"].size(); k++)
                     {
                         long long v = arg["as_ints"][k].as_int();
-                        if (v == std::numeric_limits<long long>::max())
-                            v = INT_MAX;
-                        if (v == std::numeric_limits<long long>::min())
-                            v = INT_MIN;
+                        if (is_slice_bound)
+                        {
+                            if (v == std::numeric_limits<long long>::max())
+                                v = INT_MAX;
+                            if (v == std::numeric_limits<long long>::min())
+                                v = INT_MIN;
+                        }
                         if (v > INT_MAX || v < INT_MIN)
                         {
                             // see the as_int branch above: reject out-of-range

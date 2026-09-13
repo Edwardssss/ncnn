@@ -2383,18 +2383,35 @@ int Graph::python(const std::string& pypath, const std::string& pnnxbinpath, con
                     // torch 2.x renamed torch.var/std unbiased to correction;
                     // emit a runtime-selected kwargs dict so the generated code
                     // also runs on the torch 1.8-1.13 environments covered by
-                    // pnnx.yml (those only know the unbiased keyword)
-                    if ((op->type == "torch.var" || op->type == "torch.std") && it.first == "unbiased" && it.second.type == 1)
+                    // pnnx.yml (those only know the unbiased keyword). the pt2
+                    // path normalizes the same op to a correction parameter, so
+                    // an integral correction (0/1) is translated back to
+                    // unbiased for those versions; a fractional correction has
+                    // no unbiased equivalent and stays literal, which raises on
+                    // a torch that cannot represent it instead of silently
+                    // rounding the statistic.
+                    if ((op->type == "torch.var" || op->type == "torch.std") && (it.first == "unbiased" || it.first == "correction"))
                     {
-                        // a positional input list was already printed above, so
-                        // the kwargs dict needs a leading separator unless it is
-                        // the only argument (an op with no tensor inputs)
-                        if (!(op->inputs.empty() && i == 0))
-                            fprintf(pyfp, ", ");
-                        fprintf(pyfp, "**({'correction': %s} if _torch_has_correction else {'unbiased': %s})",
-                                it.second.b ? "True" : "False", it.second.b ? "True" : "False");
-                        i++;
-                        continue;
+                        int correction = -1;
+                        if (it.first == "unbiased" && it.second.type == 1)
+                            correction = it.second.b ? 1 : 0;
+                        else if (it.first == "correction" && it.second.type == 2)
+                            correction = it.second.i;
+                        else if (it.first == "correction" && it.second.type == 3 && (it.second.f == 0.f || it.second.f == 1.f))
+                            correction = (int)it.second.f;
+
+                        if (correction == 0 || correction == 1)
+                        {
+                            // a positional input list was already printed above, so
+                            // the kwargs dict needs a leading separator unless it is
+                            // the only argument (an op with no tensor inputs)
+                            if (!(op->inputs.empty() && i == 0))
+                                fprintf(pyfp, ", ");
+                            fprintf(pyfp, "**({'correction': %d} if _torch_has_correction else {'unbiased': %s})",
+                                    correction, correction ? "True" : "False");
+                            i++;
+                            continue;
+                        }
                     }
 
                     const char* key_name = it.first.c_str();
