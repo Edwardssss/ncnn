@@ -75,6 +75,31 @@ void torch_rnn_pt2(Graph& graph)
         if (list_index == -1)
             continue;
 
+        // the packed-sequence overloads (aten::gru.data / aten::rnn_*.data) are
+        // normalized to the same aten:: name but take
+        // (data, batch_sizes, hx, params, ...). ncnn has no unpacking layer, and
+        // the rewrite below would keep batch_sizes as the hidden state (or, for
+        // LSTM, mistake the real hx/cx pair for the weights list) while dropping
+        // the hidden state, so decline those nodes - the aten operator then
+        // stays visible - instead of emitting a model that silently computes
+        // something else. batch_sizes is always the second input and is an
+        // integer tensor, while hx is floating point, and it shifts the weights
+        // list to index 3.
+        bool packed_overload = list_index != 2;
+        if (op->inputs.size() > 1)
+        {
+            const int t = op->inputs[1]->type;
+            if (t == 4 || t == 5 || t == 6 || t == 7 || t == 8 || t == 9)
+                packed_overload = true;
+        }
+        for (size_t j = 0; !packed_overload && j < op->inputnames.size(); j++)
+        {
+            if (op->inputnames[j] == "batch_sizes")
+                packed_overload = true;
+        }
+        if (packed_overload)
+            continue;
+
         Operator* list_cons = op->inputs[list_index]->producer;
 
         // the weight list: ListConstruct inputs must be pnnx.Attribute
