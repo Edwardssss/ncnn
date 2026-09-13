@@ -32,6 +32,25 @@ namespace pnnx {
 // default-kwargs restoration (append_default_kwargs + new_constant helpers)
 // is split out into load_pt2_defaults.cpp (see load_pt2_defaults.h).
 
+// dynamo encodes "to the end" slice bounds as INT64_MAX / INT64_MIN, and pnnx
+// represents those bounds as INT_MAX / INT_MIN. only the slice bounds
+// (start/end) carry that meaning: the same values appearing anywhere else are
+// genuine 64-bit scalars (e.g. a torch.full fill_value) that the int32 pnnx
+// Parameter cannot hold, so the caller must reject them explicitly instead of
+// letting this substitution silently change the model.
+static long long map_slice_bound_sentinel(const std::string& argname, long long v)
+{
+    if (argname != "start" && argname != "end")
+        return v;
+
+    if (v == std::numeric_limits<long long>::max())
+        return INT_MAX;
+    if (v == std::numeric_limits<long long>::min())
+        return INT_MIN;
+
+    return v;
+}
+
 // recursively build a higher_order subgraph (wrap_with_set_grad_enabled /
 // wrap_with_autocast); subgraph nodes are merged into the main graph, subgraph
 // inputs reference main-graph operands and subgraph outputs become the
@@ -149,20 +168,38 @@ static int inline_wrapper_subgraph(Graph& g, const JsonValue& nd,
     int ret = build_subgraph_nodes(g, *subgraph, operands_by_name, constant_index, subop_index);
 
     // map the subgraph results to the wrapper output names before undoing the
-    // placeholder bindings (the two name sets are disjoint, order is fine)
+    // placeholder bindings (the two name sets are disjoint, order is fine). a
+    // subgraph may return a tensor list (e.g. a split result consumed after
+    // wrap_with_autocast), in which case both sides describe the same members
+    // through as_tensors, so each member is mapped individually - otherwise the
+    // following main-graph consumer cannot resolve the wrapper's output names.
     if (ret == 0 && subgraph->has("outputs") && nd.has("outputs"))
     {
         const JsonValue& sub_outs = (*subgraph)["outputs"];
         const JsonValue& wrap_outs = nd["outputs"];
         for (size_t k = 0; k < sub_outs.size() && k < wrap_outs.size(); k++)
         {
-            if (!sub_outs[k].has("as_tensor") || !wrap_outs[k].has("as_tensor"))
-                continue;
-            std::string sname = sub_outs[k]["as_tensor"]["name"].as_string();
-            std::string wname = wrap_outs[k]["as_tensor"]["name"].as_string();
-            std::map<std::string, Operand*>::iterator it = operands_by_name.find(sname);
-            if (it != operands_by_name.end() && operands_by_name.find(wname) == operands_by_name.end())
-                operands_by_name[wname] = it->second;
+            if (sub_outs[k].has("as_tensor") && wrap_outs[k].has("as_tensor"))
+            {
+                std::string sname = sub_outs[k]["as_tensor"]["name"].as_string();
+                std::string wname = wrap_outs[k]["as_tensor"]["name"].as_string();
+                std::map<std::string, Operand*>::iterator it = operands_by_name.find(sname);
+                if (it != operands_by_name.end() && operands_by_name.find(wname) == operands_by_name.end())
+                    operands_by_name[wname] = it->second;
+            }
+            else if (sub_outs[k].has("as_tensors") && wrap_outs[k].has("as_tensors"))
+            {
+                const JsonValue& sm = sub_outs[k]["as_tensors"];
+                const JsonValue& wm = wrap_outs[k]["as_tensors"];
+                for (size_t m = 0; m < sm.size() && m < wm.size(); m++)
+                {
+                    std::string sname = sm[m]["name"].as_string();
+                    std::string wname = wm[m]["name"].as_string();
+                    std::map<std::string, Operand*>::iterator it = operands_by_name.find(sname);
+                    if (it != operands_by_name.end() && operands_by_name.find(wname) == operands_by_name.end())
+                        operands_by_name[wname] = it->second;
+                }
+            }
         }
     }
 
@@ -292,15 +329,10 @@ static int build_subgraph_nodes(Graph& g, const JsonValue& subgraph,
             }
             else if (arg.has("as_int"))
             {
-                // mirror the main loader loop: INT64_MAX/MIN are dynamo's
-                // "to the end" sentinels, and any other 64-bit scalar outside
-                // the int32 range would be silently truncated by the
-                // Parameter(int) narrowing - reject it explicitly instead
-                long long iv = arg["as_int"].as_int();
-                if (iv == std::numeric_limits<long long>::max())
-                    iv = INT_MAX;
-                if (iv == std::numeric_limits<long long>::min())
-                    iv = INT_MIN;
+                // see map_slice_bound_sentinel(): only the slice bounds are
+                // sentinels, any other 64-bit scalar is rejected below instead
+                // of being truncated by the Parameter(int) narrowing
+                long long iv = map_slice_bound_sentinel(argname, arg["as_int"].as_int());
                 if (iv > INT_MAX || iv < INT_MIN)
                 {
                     fprintf(stderr, "unsupported 64-bit integer argument %lld in subgraph node %s\n", iv, op_type.c_str());
@@ -313,11 +345,7 @@ static int build_subgraph_nodes(Graph& g, const JsonValue& subgraph,
                 std::vector<int> ai;
                 for (size_t k = 0; k < arg["as_ints"].size(); k++)
                 {
-                    long long v = arg["as_ints"][k].as_int();
-                    if (v == std::numeric_limits<long long>::max())
-                        v = INT_MAX;
-                    if (v == std::numeric_limits<long long>::min())
-                        v = INT_MIN;
+                    long long v = map_slice_bound_sentinel(argname, arg["as_ints"][k].as_int());
                     if (v > INT_MAX || v < INT_MIN)
                     {
                         // see the as_int branch above
@@ -1313,21 +1341,11 @@ int load_exportedprogram(const std::string& pt2path, Graph& g,
                 }
                 else if (arg.has("as_int"))
                 {
-                    // INT64_MAX/MIN are dynamo's "to the end" sentinels for the
-                    // slice bounds, mapped to pnnx INT_MAX/INT_MIN. any other
-                    // integer argument keeps its own value, so a genuine
-                    // torch.full(..., 9223372036854775807, dtype=torch.int64)
-                    // is rejected below instead of being silently replaced by
-                    // the sentinel's value.
-                    const bool is_slice_bound = (argname == "start" || argname == "end");
-                    long long iv = arg["as_int"].as_int();
-                    if (is_slice_bound)
-                    {
-                        if (iv == std::numeric_limits<long long>::max())
-                            iv = INT_MAX;
-                        if (iv == std::numeric_limits<long long>::min())
-                            iv = INT_MIN;
-                    }
+                    // see map_slice_bound_sentinel(): only the slice bounds are
+                    // remapped, so a genuine torch.full(...,
+                    // 9223372036854775807, dtype=torch.int64) is rejected below
+                    // instead of being silently replaced by the sentinel value
+                    long long iv = map_slice_bound_sentinel(argname, arg["as_int"].as_int());
                     if (iv > INT_MAX || iv < INT_MIN)
                     {
                         // pnnx Parameter stores integers as int32; an exported
@@ -1342,18 +1360,10 @@ int load_exportedprogram(const std::string& pt2path, Graph& g,
                 }
                 else if (arg.has("as_ints"))
                 {
-                    const bool is_slice_bound = (argname == "start" || argname == "end");
                     std::vector<int> ai;
                     for (size_t k = 0; k < arg["as_ints"].size(); k++)
                     {
-                        long long v = arg["as_ints"][k].as_int();
-                        if (is_slice_bound)
-                        {
-                            if (v == std::numeric_limits<long long>::max())
-                                v = INT_MAX;
-                            if (v == std::numeric_limits<long long>::min())
-                                v = INT_MIN;
-                        }
+                        long long v = map_slice_bound_sentinel(argname, arg["as_ints"][k].as_int());
                         if (v > INT_MAX || v < INT_MIN)
                         {
                             // see the as_int branch above: reject out-of-range
@@ -1525,15 +1535,19 @@ int load_exportedprogram(const std::string& pt2path, Graph& g,
                 // multiple outputs: one list output + prim::ListUnpack to split
                 // pnnx convention: multi-output ops emit one list first, then
                 // fuse_op1ton_unpack expands it
-                char list_name[32];
-                snprintf(list_name, 32, "%s_list", op_name);
+                //
+                // both names are derived from op_name / the output index, so
+                // size the buffers to hold a full op_name plus the suffix and
+                // index (gcc cannot prove the snprintf above stayed short)
+                char list_name[64];
+                snprintf(list_name, 64, "%s_list", op_name);
 
                 Operand* list_op = g.new_operand(list_name);
                 list_op->producer = op;
                 op->outputs.push_back(list_op);
 
-                char lu_name[32];
-                snprintf(lu_name, 32, "pnnx_unpack_%zu", i);
+                char lu_name[64];
+                snprintf(lu_name, 64, "pnnx_unpack_%zu", i);
                 Operator* lu = g.new_operator("prim::ListUnpack", lu_name);
 
                 list_op->consumers.push_back(lu);
