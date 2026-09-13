@@ -2,12 +2,115 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include "pass_level2.h"
+#include "utils.h"
 
 #include <algorithm>
 #include <math.h>
 #include <string.h>
 
 namespace pnnx {
+
+// float/double square root without a narrowing conversion (a templated
+// sqrt() call would round the f32 path through double and change its last bit)
+static float sqrt_of(float x)
+{
+    return sqrtf(x);
+}
+
+static double sqrt_of(double x)
+{
+    return sqrt(x);
+}
+
+// read an f32/f64/f16 attribute as double without narrowing an f64 one. the
+// shape-empty (scalar) attribute holds exactly one element, which
+// get_float32_data() reports as zero elements, so the bytes are decoded here.
+static bool read_as_double(const Attribute& a, std::vector<double>& out)
+{
+    const int ec = a.shape.empty() ? 1 : a.elemcount();
+    if (ec <= 0 || a.data.size() < (size_t)ec * a.elemsize())
+        return false;
+
+    out.resize(ec);
+    if (a.type == 2) // f64
+    {
+        memcpy(out.data(), a.data.data(), out.size() * sizeof(double));
+        return true;
+    }
+    if (a.type == 1) // f32
+    {
+        const float* p = (const float*)a.data.data();
+        for (int i = 0; i < ec; i++)
+            out[i] = (double)p[i];
+        return true;
+    }
+    if (a.type == 3) // f16
+    {
+        const unsigned short* p = (const unsigned short*)a.data.data();
+        for (int i = 0; i < ec; i++)
+            out[i] = (double)float16_to_float32(p[i]);
+        return true;
+    }
+
+    return false;
+}
+
+// aten::_weight_norm(v, g, dim): weight = v * (g / ||v||_2) with the L2 norm
+// taken over all coords except dim (norm_except_dim); dim=-1 means the norm
+// over all coords (scalar). templated so an f64 weight is folded in double
+// precision instead of being narrowed to f32 and widened back.
+template <typename T>
+static void fold_weight_norm(const std::vector<int>& v_shape, const std::vector<int>& g_shape, bool g_is_scalar, int dim, const std::vector<T>& v, const std::vector<T>& g, std::vector<T>& weight)
+{
+    const int dims = (int)v_shape.size();
+    const int v_count = (int)v.size();
+    const int norm_count = (dim == -1) ? 1 : v_shape[dim];
+
+    // per-coord L2 norm over all non-dim coords
+    std::vector<T> norm_flat(norm_count, (T)0);
+    for (int idx = 0; idx < v_count; idx++)
+    {
+        int rem = idx;
+        int coord[16] = {0};
+        for (int dd = dims - 1; dd >= 0; dd--)
+        {
+            coord[dd] = rem % v_shape[dd];
+            rem /= v_shape[dd];
+        }
+        const int norm_idx = (dim == -1) ? 0 : coord[dim];
+        norm_flat[norm_idx] += v[idx] * v[idx];
+    }
+    for (int c = 0; c < norm_count; c++)
+        norm_flat[c] = sqrt_of(norm_flat[c]);
+
+    // weight = v * (g / ||v||)
+    weight.resize(v_count);
+    for (int idx = 0; idx < v_count; idx++)
+    {
+        int rem = idx;
+        int coord[16] = {0};
+        for (int dd = dims - 1; dd >= 0; dd--)
+        {
+            coord[dd] = rem % v_shape[dd];
+            rem /= v_shape[dd];
+        }
+
+        const int norm_idx = (dim == -1) ? 0 : coord[dim];
+
+        // g index (broadcast)
+        int g_idx = 0;
+        if (!g_is_scalar)
+        {
+            for (int dd = 0; dd < dims; dd++)
+            {
+                const int gc = (g_shape[dd] == 1) ? 0 : coord[dd];
+                g_idx = g_idx * g_shape[dd] + gc;
+            }
+        }
+
+        weight[idx] = v[idx] * g[g_idx] / norm_flat[norm_idx];
+    }
+}
 
 // pt2 path: the parametrization of nn.utils.weight_norm is expanded by dynamo
 // into weight = v * (g / ||v||_2) with the norm over all coords except dim
@@ -115,17 +218,13 @@ pnnx.Output             output      1 0 out
             return false;
         if (!has_keepdim || !keepdim)
             return false;
-        // only fold weights that get/set_float32_data round-trip in the same
-        // precision the fold itself computes in (f32/f16). an f64 weight is
-        // excluded on purpose: the norm and the product are computed in f32, so
-        // the folded constant would be written back rounded to f32 precision
-        // while its declared type stays f64 - a silent precision change for a
-        // double model. keep the original norm/div/mul chain there instead (an
-        // f16 weight is computed in f32 and then rounded, which is more precise
-        // than the chain). a non-float or bf16 weight would leave the
+        // only fold float weights (f32/f64/f16). an f64 weight is read,
+        // computed and written as double (see write()), so it keeps its
+        // precision instead of being narrowed to f32 and widened back into an
+        // f64 attribute. a non-float or bf16 weight would leave the
         // replacement pnnx.Attribute without usable weight data, so write()
         // would bail out after the graph was already rewritten.
-        if ((m_v.type != 1 && m_v.type != 3) || (m_g.type != 1 && m_g.type != 3))
+        if ((m_v.type != 1 && m_v.type != 2 && m_v.type != 3) || (m_g.type != 1 && m_g.type != 2 && m_g.type != 3))
             return false;
         // a scalar v cannot be folded (no per-coord norm); reject before rewrite
         if (m_v.shape.empty())
@@ -147,10 +246,10 @@ pnnx.Output             output      1 0 out
                 return false;
         }
         // a scalar (dim=-1) f16 g cannot be decoded without a half helper,
-        // and the scalar decoders need full element bytes
+        // and the scalar decoders need one full element
         if (m_g.shape.empty() && m_g.type == 3)
             return false;
-        if (m_g.shape.empty() && m_g.type == 1 && m_g.data.size() < 4)
+        if (m_g.shape.empty() && m_g.data.size() < m_g.elemsize())
             return false;
         // fold would overflow the coord[16] stack buffer for >16-d weights;
         // reject before the graph is rewritten
@@ -243,12 +342,13 @@ pnnx.Output             output      1 0 out
         if (dim < -1 || dim >= dims)
             return;
 
-        // extract v as f32 (Attribute helpers handle f32/f64/f16 internally)
-        std::vector<float> vv = v_attr.get_float32_data();
-        if (vv.empty())
-            return;
-        const float* vp = vv.data();
-        const int v_count = (int)vv.size();
+        // the fold must run in the operands' own precision: get_float32_data()
+        // narrows an f64 attribute to f32 before the norm is computed, and
+        // set_float32_data() widens the rounded result back into an f64
+        // attribute, which silently drops a double model to f32 weights. f64
+        // is therefore read, computed and written as double (an f32 or f16
+        // operand widens to f64 exactly).
+        const bool use_double = v_attr.type == 2 || g_attr.type == 2;
 
         // g broadcasts over the dim axis; scalar g (dim=-1 case) is also supported
         const std::vector<int>& g_shape = g_attr.shape;
@@ -271,84 +371,56 @@ pnnx.Output             output      1 0 out
         if (g_count <= 0)
             return;
 
-        std::vector<float> gv;
-        if (g_is_scalar)
+        std::vector<float> vf, gf, weight_f;
+        std::vector<double> vd, gd, weight_d;
+        if (use_double)
         {
-            // scalar g (weight_norm dim=-1): decode the single element by dtype
-            gv.resize(1);
-            if (g_attr.type == 1)
-                gv[0] = *(const float*)g_attr.data.data();
-            else
+            if (!read_as_double(v_attr, vd))
                 return;
+            if (!read_as_double(g_attr, gd))
+                return;
+            if ((int)gd.size() != g_count)
+                return;
+
+            fold_weight_norm<double>(v_shape, g_shape, g_is_scalar, dim, vd, gd, weight_d);
         }
         else
         {
-            gv = g_attr.get_float32_data();
-            if ((int)gv.size() != g_count)
+            vf = v_attr.get_float32_data();
+            if (vf.empty())
                 return;
-        }
-        const float* gp = gv.data();
 
-        // aten::_weight_norm(v, g, dim): weight = v * (g / ||v||_2) where the
-        // L2 norm is taken over all coords except dim (norm_except_dim).
-        // dim=-1 means the norm over all coords (scalar).
-        int norm_count = (dim == -1) ? 1 : v_shape[dim];
-
-        // per-coord L2 norm over all non-dim coords
-        std::vector<float> norm_flat(norm_count, 0.f);
-        for (int idx = 0; idx < v_count; idx++)
-        {
-            int rem = idx;
-            int coord[16];
-            for (int dd = dims - 1; dd >= 0; dd--)
-            {
-                coord[dd] = rem % v_shape[dd];
-                rem /= v_shape[dd];
-            }
-            int norm_idx = (dim == -1) ? 0 : coord[dim];
-            norm_flat[norm_idx] += vp[idx] * vp[idx];
-        }
-        for (int c = 0; c < norm_count; c++)
-            norm_flat[c] = sqrtf(norm_flat[c]);
-
-        // weight = v * (g / ||v||)
-        std::vector<float> weight_flat(v_count);
-        for (int idx = 0; idx < v_count; idx++)
-        {
-            // decompose idx into v coordinates (match() rejected weights above
-            // 16 dims, so the buffer always covers v_shape)
-            int rem = idx;
-            int coord[16] = {0};
-            for (int dd = dims - 1; dd >= 0; dd--)
-            {
-                coord[dd] = rem % v_shape[dd];
-                rem /= v_shape[dd];
-            }
-
-            int norm_idx = (dim == -1) ? 0 : coord[dim];
-
-            // g index (broadcast)
-            int g_idx = 0;
             if (g_is_scalar)
             {
-                g_idx = 0;
+                // scalar g (weight_norm dim=-1): decode the single element
+                gf.resize(1);
+                gf[0] = *(const float*)g_attr.data.data();
             }
             else
             {
-                for (int dd = 0; dd < dims; dd++)
-                {
-                    int gc = (g_shape[dd] == 1) ? 0 : coord[dd];
-                    g_idx = g_idx * g_shape[dd] + gc;
-                }
+                gf = g_attr.get_float32_data();
+                if ((int)gf.size() != g_count)
+                    return;
             }
 
-            weight_flat[idx] = vp[idx] * gp[g_idx] / norm_flat[norm_idx];
+            fold_weight_norm<float>(v_shape, g_shape, g_is_scalar, dim, vf, gf, weight_f);
         }
 
         // write back in the original weight dtype (f32/f64/f16)
         Attribute a = v_attr; // keeps type/shape
         a.shape = v_shape;
-        a.set_float32_data(weight_flat);
+        if (use_double && v_attr.type == 2)
+        {
+            a.data.resize(weight_d.size() * sizeof(double));
+            memcpy(a.data.data(), weight_d.data(), a.data.size());
+        }
+        else
+        {
+            if (use_double)
+                weight_f.assign(weight_d.begin(), weight_d.end());
+            a.set_float32_data(weight_f);
+        }
+
         op->attrs["data"] = a;
 
         op->outputs[0]->type = v_attr.type;
